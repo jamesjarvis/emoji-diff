@@ -38,36 +38,52 @@ if [[ -z "$main_branch" ]]; then
     main_branch="HEAD~1"
 fi
 
-# Get git diff using pathspec to exclude *.gen.* files
-raw_diff=$(git diff "$main_branch" -- . ':(exclude)*.gen.*')
+# Get git diff using pathspec to exclude *.gen.* files and .*.gen..* files
+raw_diff=$(git diff "$main_branch" -- . ':(exclude)*.gen.*' ':(exclude).*\.gen\..*')
 if [[ -z "$raw_diff" ]]; then
     echo "🐌"  # No changes emoji
     exit 0
 fi
 
-# Count lines added and removed
-added_lines=$(echo "$raw_diff" | grep -c '^+[^+]' || true)
-removed_lines=$(echo "$raw_diff" | grep -c '^-[^-]' || true)
-total_changes=$((added_lines + removed_lines))
+# Truncate diff to 50,000 characters if needed
+if [[ ${#raw_diff} -gt 50000 ]]; then
+    truncated_diff="${raw_diff:0:50000}"
+    diff_content="$truncated_diff
 
-# If no changes after filtering, return small change emoji
-if [[ $total_changes -eq 0 ]]; then
-    echo "🐌"
-    exit 0
+[DIFF TRUNCATED - showing first 50,000 characters of larger change]"
+else
+    diff_content="$raw_diff"
 fi
 
 # Create prompt for OpenAI
-prompt="Based on the following code change metrics, suggest a single animal emoji that represents the semantic size and complexity of these changes:
+prompt="You are a code reviewer estimating how long/complex a PR review will be based on the git diff.
 
-- Lines added: $added_lines
-- Lines removed: $removed_lines
-- Total changes: $total_changes
+Analyze the following git diff and choose an animal emoji that represents the review complexity.
+Consider:
+- Type of files changed (tests, core logic, UI, config, migrations)
+- Complexity of changes (simple updates vs architectural changes)
+- Risk level (data models, API contracts, security, breaking changes)
+- Whether changes are mostly additions, deletions, or modifications
 
-Please respond with:
-1. A single animal emoji that represents the scale (e.g., 🐜 for tiny changes, 🐘 for large changes)
-2. A brief reasoning for your choice
+Emoji scale for estimated review time/difficulty:
+🐜 = Trivial review (5 min): typos, formatting, simple config
+🐭 = Quick review (15 min): small bug fixes, test updates, documentation
+🐰 = Standard review (30 min): typical feature work, straightforward logic
+🦊 = Moderate review (1 hour): cross-cutting changes, refactoring, multiple components
+🐻 = Substantial review (2 hours): complex logic, state management, algorithmic changes
+🐘 = Major review (4+ hours): architectural changes, large features, system design
+🦖 = Critical review (requires multiple passes): security, data migrations, breaking API changes
 
-Format your response as JSON with 'emoji' and 'reasoning' fields."
+Git diff to analyze:
+\`\`\`diff
+$diff_content
+\`\`\`
+
+Respond with JSON containing:
+1. 'emoji': The single animal emoji representing review complexity
+2. 'reasoning': Brief explanation of what makes this review that complexity level (mention specific file types or patterns you noticed)
+
+Format: {\"emoji\": \"🐜\", \"reasoning\": \"Only documentation updates in README files\"}"
 
 # Make API call to OpenAI
 api_request_body=$(jq -n \
@@ -82,6 +98,12 @@ api_response=$(curl -s "https://api.openai.com/v1/responses" \
 
 # Extract emoji from response - the API response has a different structure
 response_text=$(echo "$api_response" | jq -r '.output[1].content[0].text // empty' 2>/dev/null || echo "")
+
+# Debug: Check if we got an error
+error_message=$(echo "$api_response" | jq -r '.error.message // empty' 2>/dev/null || echo "")
+if [[ -n "$error_message" ]] && [[ "$verbose" = true ]]; then
+    echo "API Error: $error_message" >&2
+fi
 
 # Try to parse as JSON first
 emoji=$(echo "$response_text" | jq -r '.emoji // empty' 2>/dev/null || echo "")
